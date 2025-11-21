@@ -1,55 +1,67 @@
-from fastapi import FastAPI, Query
-from fastapi.responses import JSONResponse
+from flask import Flask, request, jsonify
 import sqlite3
-import os
+from contextlib import closing
 
-app = FastAPI(title="Simple API with Vulnerability")
+app = Flask(__name__)
 
-# Initialize database
-def init_db():
-    conn = sqlite3.connect('users.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY,
-            username TEXT,
-            email TEXT
-        )
-    ''')
-    cursor.execute("INSERT OR IGNORE INTO users (username, email) VALUES ('admin', 'admin@example.com')")
-    cursor.execute("INSERT OR IGNORE INTO users (username, email) VALUES ('user1', 'user1@example.com')")
-    conn.commit()
-    conn.close()
+DB_PATH = 'users.db'
 
-init_db()
 
-@app.get("/")
-def read_root():
-    return {"message": "Welcome to the vulnerable API"}
+def get_db_connection():
+    conn = sqlite3.connect(DB_PATH)
+    # Return rows as dict-like objects
+    conn.row_factory = sqlite3.Row
+    return conn
 
-@app.get("/users")
-def get_users(username: str = Query(None)):
-    """
-    Get user information by username.
-    VULNERABILITY: SQL Injection - username parameter is directly concatenated into SQL query
-    """
-    conn = sqlite3.connect('users.db')
-    cursor = conn.cursor()
-    
-    if username:
-        # VULNERABLE: Direct string concatenation - SQL Injection vulnerability
-        query = f"SELECT * FROM users WHERE username = '{username}'"
-        cursor.execute(query)
-    else:
-        cursor.execute("SELECT * FROM users")
-    
-    results = cursor.fetchall()
-    conn.close()
-    
-    users = [{"id": r[0], "username": r[1], "email": r[2]} for r in results]
-    return {"users": users}
 
-@app.get("/health")
-def health_check():
-    return {"status": "healthy"}
+@app.route('/users', methods=['GET'])
+def users():
+    # Securely handle optional query parameters
+    name = request.args.get('name')
+    limit = request.args.get('limit', default=None)
+
+    # Validate limit to avoid abuse; cast to int if provided
+    if limit is not None:
+        try:
+            limit = int(limit)
+            # enforce sane bounds
+            if limit < 1:
+                limit = 1
+            if limit > 500:
+                limit = 500
+        except ValueError:
+            # Fallback to a safe default if invalid
+            limit = 100
+
+    with closing(get_db_connection()) as conn:
+        with closing(conn.cursor()) as cur:
+            if name:
+                # Use parameterized query to prevent SQL injection
+                if limit:
+                    cur.execute(
+                        'SELECT id, name, email FROM users WHERE name = ? LIMIT ?',
+                        (name, limit)
+                    )
+                else:
+                    cur.execute(
+                        'SELECT id, name, email FROM users WHERE name = ?',
+                        (name,)
+                    )
+            else:
+                if limit:
+                    cur.execute(
+                        'SELECT id, name, email FROM users LIMIT ?',
+                        (limit,)
+                    )
+                else:
+                    cur.execute('SELECT id, name, email FROM users')
+
+            rows = cur.fetchall()
+            users_list = [dict(row) for row in rows]
+
+    return jsonify(users_list)
+
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
 
