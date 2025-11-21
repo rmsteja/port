@@ -1,55 +1,58 @@
-from fastapi import FastAPI, Query
-from fastapi.responses import JSONResponse
+from flask import Flask, request, jsonify
 import sqlite3
-import os
+from contextlib import closing
 
-app = FastAPI(title="Simple API with Vulnerability")
+app = Flask(__name__)
 
-# Initialize database
-def init_db():
-    conn = sqlite3.connect('users.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY,
-            username TEXT,
-            email TEXT
-        )
-    ''')
-    cursor.execute("INSERT OR IGNORE INTO users (username, email) VALUES ('admin', 'admin@example.com')")
-    cursor.execute("INSERT OR IGNORE INTO users (username, email) VALUES ('user1', 'user1@example.com')")
-    conn.commit()
-    conn.close()
+DB_PATH = "./app.db"
 
-init_db()
 
-@app.get("/")
-def read_root():
-    return {"message": "Welcome to the vulnerable API"}
+def get_db_connection():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-@app.get("/users")
-def get_users(username: str = Query(None)):
-    """
-    Get user information by username.
-    VULNERABILITY: SQL Injection - username parameter is directly concatenated into SQL query
-    """
-    conn = sqlite3.connect('users.db')
-    cursor = conn.cursor()
-    
-    if username:
-        # VULNERABLE: Direct string concatenation - SQL Injection vulnerability
-        query = f"SELECT * FROM users WHERE username = '{username}'"
-        cursor.execute(query)
-    else:
-        cursor.execute("SELECT * FROM users")
-    
-    results = cursor.fetchall()
-    conn.close()
-    
-    users = [{"id": r[0], "username": r[1], "email": r[2]} for r in results]
-    return {"users": users}
 
-@app.get("/health")
-def health_check():
-    return {"status": "healthy"}
+def escape_like(term: str) -> str:
+    """Escape wildcard characters for SQL LIKE patterns."""
+    return term.replace("%", "[%]").replace("_", "[_]")
+
+
+@app.route("/users", methods=["GET"])
+def users():
+    # Support filtering by numeric id or by name fragment.
+    user_id = request.args.get("id")
+    name = request.args.get("name")
+
+    with closing(get_db_connection()) as conn, closing(conn.cursor()) as cur:
+        if user_id is not None:
+            # Ensure id is an integer and use a parameterized query to prevent SQL injection.
+            try:
+                uid = int(user_id)
+            except (TypeError, ValueError):
+                return jsonify({"error": "id must be an integer"}), 400
+
+            cur.execute("SELECT id, name, email FROM users WHERE id = ?", (uid,))
+            row = cur.fetchone()
+            if not row:
+                return jsonify({"error": "user not found"}), 404
+            return jsonify(dict(row)), 200
+
+        # Name search using LIKE must be parameterized and escape wildcards provided by user
+        if name is not None:
+            safe = escape_like(name)
+            # Use ESCAPE clause so our escaping works as intended
+            pattern = f"%{safe}%"
+            cur.execute("SELECT id, name, email FROM users WHERE name LIKE ? ESCAPE '|'", (pattern,))
+            rows = cur.fetchall()
+            return jsonify([dict(r) for r in rows]), 200
+
+        # Default: return all users in a safe, parameterless query
+        cur.execute("SELECT id, name, email FROM users")
+        rows = cur.fetchall()
+        return jsonify([dict(r) for r in rows]), 200
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
 
