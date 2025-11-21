@@ -1,55 +1,79 @@
-from fastapi import FastAPI, Query
-from fastapi.responses import JSONResponse
+from flask import Flask, request, jsonify
 import sqlite3
 import os
+from typing import List, Dict, Any, Optional
 
-app = FastAPI(title="Simple API with Vulnerability")
+DB_PATH = os.getenv("DB_PATH", "./app.db")
 
-# Initialize database
-def init_db():
-    conn = sqlite3.connect('users.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY,
-            username TEXT,
-            email TEXT
-        )
-    ''')
-    cursor.execute("INSERT OR IGNORE INTO users (username, email) VALUES ('admin', 'admin@example.com')")
-    cursor.execute("INSERT OR IGNORE INTO users (username, email) VALUES ('user1', 'user1@example.com')")
-    conn.commit()
-    conn.close()
+app = Flask(__name__)
 
-init_db()
 
-@app.get("/")
-def read_root():
-    return {"message": "Welcome to the vulnerable API"}
+def get_db_connection() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-@app.get("/users")
-def get_users(username: str = Query(None)):
+
+@app.route("/users", methods=["GET"])
+def users() -> Any:
     """
-    Get user information by username.
-    VULNERABILITY: SQL Injection - username parameter is directly concatenated into SQL query
-    """
-    conn = sqlite3.connect('users.db')
-    cursor = conn.cursor()
-    
-    if username:
-        # VULNERABLE: Direct string concatenation - SQL Injection vulnerability
-        query = f"SELECT * FROM users WHERE username = '{username}'"
-        cursor.execute(query)
-    else:
-        cursor.execute("SELECT * FROM users")
-    
-    results = cursor.fetchall()
-    conn.close()
-    
-    users = [{"id": r[0], "username": r[1], "email": r[2]} for r in results]
-    return {"users": users}
+    Securely return users. Prevent SQL injection by using parameterized queries, never string concatenation.
 
-@app.get("/health")
-def health_check():
-    return {"status": "healthy"}
+    Supported query params:
+    - id: integer user id to fetch a single user
+    - limit: integer max rows (default 100, max 1000)
+    - offset: integer offset for pagination (default 0)
+    """
+    user_id = request.args.get("id")
+    limit = request.args.get("limit", default="100")
+    offset = request.args.get("offset", default="0")
+
+    # Validate numeric inputs strictly
+    def to_int(value: Optional[str], default: int, minimum: int = 0, maximum: Optional[int] = None) -> int:
+        try:
+            ivalue = int(value) if value is not None else default
+        except (TypeError, ValueError):
+            ivalue = default
+        if ivalue < minimum:
+            ivalue = minimum
+        if maximum is not None and ivalue > maximum:
+            ivalue = maximum
+        return ivalue
+
+    limit_i = to_int(limit, 100, minimum=1, maximum=1000)
+    offset_i = to_int(offset, 0, minimum=0)
+
+    try:
+        with get_db_connection() as conn:
+            cur = conn.cursor()
+            if user_id is not None:
+                # Ensure id is integer to avoid type confusion
+                try:
+                    user_id_i = int(user_id)
+                except ValueError:
+                    return jsonify({"error": "Invalid id"}), 400
+                # Parameterized query prevents SQL injection
+                cur.execute("SELECT id, name, email FROM users WHERE id = ?", (user_id_i,))
+                row = cur.fetchone()
+                if not row:
+                    return jsonify({"error": "User not found"}), 404
+                return jsonify({"id": row["id"], "name": row["name"], "email": row["email"]})
+            else:
+                # Use LIMIT/OFFSET as parameters when supported by driver; sqlite3 supports binding
+                cur.execute(
+                    "SELECT id, name, email FROM users ORDER BY id LIMIT ? OFFSET ?",
+                    (limit_i, offset_i),
+                )
+                rows = cur.fetchall()
+                users_list: List[Dict[str, Any]] = [
+                    {"id": r["id"], "name": r["name"], "email": r["email"]} for r in rows
+                ]
+                return jsonify(users_list)
+    except sqlite3.Error as e:
+        return jsonify({"error": "Database error", "detail": str(e)}), 500
+
+
+if __name__ == "__main__":
+    # Simple dev server; in production use a proper WSGI server
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")), debug=False)
 
