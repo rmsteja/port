@@ -1,55 +1,40 @@
-from fastapi import FastAPI, Query
-from fastapi.responses import JSONResponse
+from flask import Flask, request, jsonify
 import sqlite3
 import os
 
-app = FastAPI(title="Simple API with Vulnerability")
+app = Flask(__name__)
 
-# Initialize database
-def init_db():
-    conn = sqlite3.connect('users.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY,
-            username TEXT,
-            email TEXT
-        )
-    ''')
-    cursor.execute("INSERT OR IGNORE INTO users (username, email) VALUES ('admin', 'admin@example.com')")
-    cursor.execute("INSERT OR IGNORE INTO users (username, email) VALUES ('user1', 'user1@example.com')")
-    conn.commit()
-    conn.close()
+DB_PATH = os.getenv("DB_PATH", "app.db")
 
-init_db()
 
-@app.get("/")
-def read_root():
-    return {"message": "Welcome to the vulnerable API"}
+def get_db_connection():
+    conn = sqlite3.connect(DB_PATH)
+    # Return rows as dictionaries for JSON response
+    conn.row_factory = sqlite3.Row
+    return conn
 
-@app.get("/users")
-def get_users(username: str = Query(None)):
-    """
-    Get user information by username.
-    VULNERABILITY: SQL Injection - username parameter is directly concatenated into SQL query
-    """
-    conn = sqlite3.connect('users.db')
-    cursor = conn.cursor()
-    
-    if username:
-        # VULNERABLE: Direct string concatenation - SQL Injection vulnerability
-        query = f"SELECT * FROM users WHERE username = '{username}'"
-        cursor.execute(query)
-    else:
-        cursor.execute("SELECT * FROM users")
-    
-    results = cursor.fetchall()
-    conn.close()
-    
-    users = [{"id": r[0], "username": r[1], "email": r[2]} for r in results]
-    return {"users": users}
 
-@app.get("/health")
-def health_check():
-    return {"status": "healthy"}
+@app.route("/users", methods=["GET"])  # Vulnerable endpoint fixed: use parameterized queries
+def users():
+    # Safely get the optional filter parameter
+    name = request.args.get("name")
+
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        if name:
+            # FIX: Use parameterized query to prevent SQL injection
+            cur.execute("SELECT id, name, email FROM users WHERE name = ?", (name,))
+        else:
+            cur.execute("SELECT id, name, email FROM users")
+        rows = cur.fetchall()
+        # Convert rows to list of dicts
+        result = [dict(row) for row in rows]
+        return jsonify(result), 200
+    finally:
+        conn.close()
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=False)
 
