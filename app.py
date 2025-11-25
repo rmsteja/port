@@ -1,55 +1,50 @@
-from fastapi import FastAPI, Query
-from fastapi.responses import JSONResponse
+from flask import Flask, request, jsonify
 import sqlite3
-import os
 
-app = FastAPI(title="Simple API with Vulnerability")
+app = Flask(__name__)
 
-# Initialize database
-def init_db():
-    conn = sqlite3.connect('users.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY,
-            username TEXT,
-            email TEXT
-        )
-    ''')
-    cursor.execute("INSERT OR IGNORE INTO users (username, email) VALUES ('admin', 'admin@example.com')")
-    cursor.execute("INSERT OR IGNORE INTO users (username, email) VALUES ('user1', 'user1@example.com')")
-    conn.commit()
-    conn.close()
 
-init_db()
+def get_db_connection():
+    conn = sqlite3.connect('users.db', check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-@app.get("/")
-def read_root():
-    return {"message": "Welcome to the vulnerable API"}
 
-@app.get("/users")
-def get_users(username: str = Query(None)):
-    """
-    Get user information by username.
-    VULNERABILITY: SQL Injection - username parameter is directly concatenated into SQL query
-    """
-    conn = sqlite3.connect('users.db')
-    cursor = conn.cursor()
-    
-    if username:
-        # VULNERABLE: Direct string concatenation - SQL Injection vulnerability
-        query = f"SELECT * FROM users WHERE username = '{username}'"
-        cursor.execute(query)
-    else:
-        cursor.execute("SELECT * FROM users")
-    
-    results = cursor.fetchall()
-    conn.close()
-    
-    users = [{"id": r[0], "username": r[1], "email": r[2]} for r in results]
-    return {"users": users}
+@app.route('/users', methods=['GET'])
+def get_users():
+    # Securely handle user-supplied input and use parameterized queries to prevent SQL injection
+    name = request.args.get('name')
 
-@app.get("/health")
-def health_check():
-    return {"status": "healthy"}
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    users = []
+    try:
+        if name is None or name.strip() == "":
+            # If no name filter provided, return all users in a safe manner
+            cur.execute("SELECT id, name, email FROM users")
+        else:
+            # Use parameterized query instead of string concatenation
+            # Support partial match safely using LIKE with bound parameter
+            like_param = f"%{name.strip()}%"
+            cur.execute(
+                "SELECT id, name, email FROM users WHERE name LIKE ?",
+                (like_param,)
+            )
+        rows = cur.fetchall()
+        for r in rows:
+            users.append({
+                'id': r['id'],
+                'name': r['name'],
+                'email': r['email']
+            })
+    finally:
+        cur.close()
+        conn.close()
+
+    return jsonify(users), 200
+
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
 
